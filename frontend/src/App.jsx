@@ -978,6 +978,16 @@ function validateStep(step, data) {
     ) {
       errors.sleep_hours = "Enter a value between 0 and 24 hours.";
     }
+    const totalDailyHours =
+      Number(data.daily_ai_tool_usage_hrs || 0) +
+      Number(data.daily_study_hours || 0) +
+      Number(data.social_media_hrs_per_day || 0) +
+      Number(data.sleep_hours || 0);
+
+    if (totalDailyHours > 24) {
+      errors.total_daily_hours =
+        "AI Usage + Study + Social Media + Sleep hours cannot exceed 24 hours.";
+    }
   }
 
   return errors;
@@ -1517,6 +1527,14 @@ export default function App() {
                         helper="Average hours of sleep per night."
                       />
                     </div>
+                    {errors.total_daily_hours && (
+                      <div
+                        className="field-error"
+                        style={{ marginBottom: "16px" }}
+                      >
+                        {errors.total_daily_hours}
+                      </div>
+                    )}
 
                     <SliderField
                       label="Current stress level"
