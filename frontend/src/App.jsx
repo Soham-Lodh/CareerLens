@@ -1,7 +1,3 @@
-// CareerLens — Career & Burnout Predictor
-// Requires: VITE_API_BASE_URL in .env
-// Stack: React (hooks only), vanilla CSS-in-JS
-
 import React, { useState, useEffect, useRef } from "react";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL;
@@ -40,166 +36,466 @@ const initialFormData = {
   motivation_score: 5,
 };
 
+/* ─────────────────────────────────────────────
+   SHADER BACKGROUND — burnt-orange palette,
+   fixed in the viewport, z-index -1
+───────────────────────────────────────────── */
+function ShaderBackground() {
+  const canvasRef = useRef(null);
+
+  const vsSource = `
+    attribute vec4 aVertexPosition;
+    void main() {
+      gl_Position = aVertexPosition;
+    }
+  `;
+
+  const fsSource = `
+    precision highp float;
+    uniform vec2 iResolution;
+    uniform float iTime;
+
+    const float overallSpeed      = 0.12;
+    const float gridSmoothWidth   = 0.015;
+    const float axisWidth         = 0.05;
+    const float majorLineWidth    = 0.025;
+    const float minorLineWidth    = 0.0125;
+    const float majorLineFrequency = 5.0;
+    const float minorLineFrequency = 1.0;
+    const float scale             = 5.0;
+    /* ── burnt-orange line colour ── */
+    const vec4  lineColor         = vec4(0.922, 0.369, 0.157, 1.0);
+    const float minLineWidth      = 0.01;
+    const float maxLineWidth      = 0.18;
+    const float lineSpeed         = 1.0 * overallSpeed;
+    const float lineAmplitude     = 1.0;
+    const float lineFrequency     = 0.2;
+    const float warpSpeed         = 0.2 * overallSpeed;
+    const float warpFrequency     = 0.5;
+    const float warpAmplitude     = 1.0;
+    const float offsetFrequency   = 0.5;
+    const float offsetSpeed       = 1.33 * overallSpeed;
+    const float minOffsetSpread   = 0.6;
+    const float maxOffsetSpread   = 2.0;
+    const int   linesPerGroup     = 14;
+
+    #define drawCircle(pos,radius,coord)  smoothstep(radius+gridSmoothWidth,radius,length(coord-(pos)))
+    #define drawSmoothLine(pos,hw,t)      smoothstep(hw,0.0,abs(pos-(t)))
+    #define drawCrispLine(pos,hw,t)       smoothstep(hw+gridSmoothWidth,hw,abs(pos-(t)))
+    #define drawPeriodicLine(freq,w,t)    drawCrispLine(freq/2.0,w,abs(mod(t,freq)-(freq)/2.0))
+
+    float random(float t){
+      return (cos(t)+cos(t*1.3+1.3)+cos(t*1.4+1.4))/3.0;
+    }
+    float getPlasmaY(float x,float hFade,float offset){
+      return random(x*lineFrequency+iTime*lineSpeed)*hFade*lineAmplitude+offset;
+    }
+
+    void main(){
+      vec2 fragCoord = gl_FragCoord.xy;
+      vec2 uv        = fragCoord/iResolution.xy;
+      vec2 space     = (fragCoord-iResolution.xy/2.0)/iResolution.x*2.0*scale;
+
+      float hFade = 1.0-(cos(uv.x*6.28)*0.5+0.5);
+      float vFade = 1.0-(cos(uv.y*6.28)*0.5+0.5);
+
+      space.y += random(space.x*warpFrequency+iTime*warpSpeed)*warpAmplitude*(0.5+hFade);
+      space.x += random(space.y*warpFrequency+iTime*warpSpeed+2.0)*warpAmplitude*hFade;
+
+      /* very dark background: near-black with a faint warm tint */
+      vec4 bgColor1 = vec4(0.145,0.137,0.133,1.0);
+      vec4 bgColor2 = vec4(0.173,0.157,0.145,1.0);
+      vec4 lines    = vec4(0.0);
+
+      for(int l=0;l<linesPerGroup;l++){
+        float nIdx       = float(l)/float(linesPerGroup);
+        float offsetTime = iTime*offsetSpeed;
+        float offsetPos  = float(l)+space.x*offsetFrequency;
+        float rand       = random(offsetPos+offsetTime)*0.5+0.5;
+        float halfWidth  = mix(minLineWidth,maxLineWidth,rand*hFade)/2.0;
+        float offset     = random(offsetPos+offsetTime*(1.0+nIdx))*mix(minOffsetSpread,maxOffsetSpread,hFade);
+        float linePos    = getPlasmaY(space.x,hFade,offset);
+        float line       = drawSmoothLine(linePos,halfWidth,space.y)/2.0
+                         + drawCrispLine(linePos,halfWidth*0.15,space.y);
+
+        float cx         = mod(float(l)+iTime*lineSpeed,25.0)-12.0;
+        vec2  cPos       = vec2(cx,getPlasmaY(cx,hFade,offset));
+        float circle     = drawCircle(cPos,0.01,space)*4.0;
+
+        line  += circle;
+        /* keep lines subtle — multiply contribution down */
+        lines += line*lineColor*rand*0.45;
+      }
+
+      vec4 fragColor = mix(bgColor1,bgColor2,uv.x);
+      fragColor     *= vFade;
+      fragColor.a    = 1.0;
+      fragColor     += lines;
+      gl_FragColor   = fragColor;
+    }
+  `;
+
+  const loadShader = (gl, type, source) => {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      console.error("Shader compile error:", gl.getShaderInfoLog(shader));
+      gl.deleteShader(shader);
+      return null;
+    }
+    return shader;
+  };
+
+  const initShaderProgram = (gl, vs, fs) => {
+    const vertexShader = loadShader(gl, gl.VERTEX_SHADER, vs);
+    const fragmentShader = loadShader(gl, gl.FRAGMENT_SHADER, fs);
+    const program = gl.createProgram();
+    gl.attachShader(program, vertexShader);
+    gl.attachShader(program, fragmentShader);
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      console.error("Program link error:", gl.getProgramInfoLog(program));
+      return null;
+    }
+    return program;
+  };
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const gl = canvas.getContext("webgl");
+    if (!gl) return;
+
+    const program = initShaderProgram(gl, vsSource, fsSource);
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
+      gl.STATIC_DRAW,
+    );
+
+    const info = {
+      program,
+      attrib: gl.getAttribLocation(program, "aVertexPosition"),
+      uRes: gl.getUniformLocation(program, "iResolution"),
+      uTime: gl.getUniformLocation(program, "iTime"),
+    };
+
+    const resize = () => {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      gl.viewport(0, 0, canvas.width, canvas.height);
+    };
+    window.addEventListener("resize", resize);
+    resize();
+
+    let rafId;
+    const t0 = Date.now();
+    const render = () => {
+      const t = (Date.now() - t0) / 1000;
+      gl.clearColor(0, 0, 0, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.useProgram(info.program);
+      gl.uniform2f(info.uRes, canvas.width, canvas.height);
+      gl.uniform1f(info.uTime, t);
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.vertexAttribPointer(info.attrib, 2, gl.FLOAT, false, 0, 0);
+      gl.enableVertexAttribArray(info.attrib);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      rafId = requestAnimationFrame(render);
+    };
+    rafId = requestAnimationFrame(render);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      window.removeEventListener("resize", resize);
+    };
+  }, []);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      style={{
+        position: "fixed",
+        top: 0,
+        left: 0,
+        width: "100%",
+        height: "100%",
+        zIndex: 0,
+        pointerEvents: "none",
+      }}
+    />
+  );
+}
+
+/* ─────────────────────────────────────────────
+   STYLES
+───────────────────────────────────────────── */
 const STYLES = `
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+
   :root {
-    --bg: #252422;
-    --surface: #403d39;
-    --border: #5a554f;
-    --text: #fffcf2;
-    --muted: #ccc5b9;
-    --accent: #eb5e28;
+    --bg:           #252422;
+    --surface:      rgba(38, 36, 33, 0.82);
+    --surface-solid:#2e2b28;
+    --border:       rgba(255,252,242,0.10);
+    --border-hover: rgba(235,94,40,0.45);
+    --text:         #fffcf2;
+    --muted:        #9e9891;
+    --accent:       #eb5e28;
+    --accent-dim:   rgba(235,94,40,0.15);
     --accent-hover: #d45524;
-    --skeleton-highlight: #6c665f;
-    --good: #8bd17c;
-    --warn: #f2b134;
-    --bad: #ff6b5b;
+    --good:         #7fc97a;
+    --warn:         #e8b84b;
+    --bad:          #f06b5b;
+    --good-bg:      rgba(127,201,122,0.10);
+    --warn-bg:      rgba(232,184,75,0.10);
+    --bad-bg:       rgba(240,107,91,0.10);
     color-scheme: dark;
   }
 
-  * { box-sizing: border-box; }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-  .cl-app {
+  body {
     background: var(--bg);
-    color: var(--text);
-    min-height: 100vh;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    line-height: 1.5;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
   }
 
-  /* Navbar */
+  .cl-app {
+    position: relative;
+    z-index: 1;
+    color: var(--text);
+    min-height: 100vh;
+    line-height: 1.6;
+  }
+
+  /* ── Navbar ── */
   .cl-navbar {
     position: sticky;
     top: 0;
-    z-index: 50;
+    z-index: 100;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 14px 24px;
-    background: var(--surface);
+    padding: 0 32px;
+    height: 60px;
+    background: rgba(25, 23, 21, 0.75);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
     border-bottom: 1px solid var(--border);
   }
 
-  .cl-logo {
-    font-weight: 800;
-    font-size: 1.25rem;
-    color: var(--accent);
-    letter-spacing: -0.02em;
+  .cl-logo-wrap {
+    display: flex;
+    align-items: center;
+    gap: 10px;
   }
+
+  .cl-logo {
+    font-size: 1.1rem;
+    font-weight: 800;
+    color: var(--text);
+    letter-spacing: -0.03em;
+  }
+
+  .cl-logo span { color: var(--accent); }
 
   .cl-pill {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    font-size: 0.78rem;
-    padding: 5px 10px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    padding: 5px 12px;
     border-radius: 999px;
     border: 1px solid var(--border);
     color: var(--muted);
-    background: var(--bg);
-    white-space: nowrap;
+    background: rgba(255,255,255,0.04);
+    letter-spacing: 0.01em;
   }
 
   .cl-pill .dot {
-    width: 7px;
-    height: 7px;
+    width: 6px; height: 6px;
     border-radius: 50%;
     background: currentColor;
     flex-shrink: 0;
   }
 
-  .cl-pill.warming .dot { animation: cl-pulse 1.4s ease-in-out infinite; }
-  .cl-pill.ready { color: var(--good); border-color: rgba(139, 209, 124, 0.4); }
-  .cl-pill.slow { color: var(--warn); border-color: rgba(242, 177, 52, 0.4); }
+  .cl-pill.warming .dot { animation: cl-pulse 1.6s ease-in-out infinite; }
+  .cl-pill.ready   { color: var(--good);   border-color: rgba(127,201,122,0.35); }
+  .cl-pill.slow    { color: var(--warn);   border-color: rgba(232,184,75,0.35); }
 
   @keyframes cl-pulse {
-    0%, 100% { opacity: 0.3; transform: scale(0.85); }
-    50% { opacity: 1; transform: scale(1.2); }
+    0%,100% { opacity: 0.25; transform: scale(0.8); }
+    50%      { opacity: 1;    transform: scale(1.2); }
   }
 
-  /* Hero */
+  /* ── Hero ── */
   .cl-hero {
-    background: var(--bg);
-    padding: 48px 24px 32px;
+    padding: 72px 24px 56px;
     text-align: center;
-    border-bottom: 1px solid var(--border);
+    position: relative;
+  }
+
+  .cl-hero-eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 20px;
+    padding: 6px 14px;
+    border: 1px solid rgba(235,94,40,0.30);
+    border-radius: 999px;
+    background: rgba(235,94,40,0.08);
+    backdrop-filter: blur(10px);
   }
 
   .cl-hero h1 {
-    margin: 0 0 12px;
-    font-size: clamp(1.5rem, 4.2vw, 2.4rem);
-    font-weight: 800;
-    letter-spacing: -0.01em;
-    color: var(--text);
+    font-size: clamp(2rem, 5vw, 3.2rem);
+    font-weight: 900;
+    letter-spacing: -0.04em;
+    line-height: 1.08;
+     color: #ff7a45;
+     text-shadow: 0 0 20px rgba(255,122,69,0.35);
+    max-width: 700px;
+    margin: 0 auto 20px;
+  }
+
+  .cl-hero h1 em {
+    font-style: normal;
+    color: #ffffff;
+    text-shadow:
+      0 4px 12px rgba(0,0,0,0.5),
+      0 8px 40px rgba(0,0,0,0.7);
   }
 
   .cl-hero p {
-    margin: 0 auto;
-    max-width: 580px;
+    max-width: 520px;
+    margin: 0 auto 32px;
     color: var(--muted);
-    font-size: 0.98rem;
+    font-size: 1rem;
+    line-height: 1.7;
+    font-weight: 400;
   }
 
-  /* Layout */
+  .cl-hero-stats {
+    display: inline-flex;
+    gap: 0;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    background: rgba(255,255,255,0.03);
+    backdrop-filter: blur(10px);
+  }
+
+  .cl-hero-stat {
+    padding: 14px 28px;
+    text-align: center;
+    border-right: 1px solid var(--border);
+  }
+
+  .cl-hero-stat:last-child { border-right: none; }
+
+  .cl-hero-stat-num {
+    font-size: 1.4rem;
+    font-weight: 800;
+    color: var(--text);
+    letter-spacing: -0.03em;
+    display: block;
+  }
+
+  .cl-hero-stat-lbl {
+    font-size: 0.72rem;
+    color: var(--muted);
+    letter-spacing: 0.04em;
+    display: block;
+    margin-top: 2px;
+  }
+
+  /* ── Layout ── */
   .cl-container {
-    max-width: 860px;
+    max-width: 820px;
     margin: 0 auto;
-    padding: 32px 20px 64px;
+    padding: 24px 20px 80px;
   }
 
-  /* Step progress */
+  /* ── Step progress ── */
+  .cl-steps-wrap {
+    margin-bottom: 28px;
+    position: relative;
+  }
+
   .cl-steps {
     display: flex;
     align-items: center;
-    margin-bottom: 28px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 18px 24px;
+    backdrop-filter: blur(12px);
   }
 
   .cl-step {
     display: flex;
     align-items: center;
+    position: relative;
   }
 
   .cl-step-circle {
-    width: 34px;
-    height: 34px;
+    width: 32px; height: 32px;
     border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
     font-weight: 700;
-    font-size: 0.9rem;
-    border: 2px solid var(--border);
+    font-size: 0.8rem;
+    border: 1.5px solid rgba(255,255,255,0.12);
     color: var(--muted);
-    background: var(--surface);
+    background: transparent;
     flex-shrink: 0;
-    transition: background 200ms ease, border-color 200ms ease, color 200ms ease;
+    transition: all 250ms ease;
+    position: relative;
   }
 
-  .cl-step.active .cl-step-circle,
   .cl-step.complete .cl-step-circle {
-    border-color: var(--accent);
     background: var(--accent);
-    color: var(--text);
+    border-color: var(--accent);
+    color: #fff;
+    box-shadow: 0 0 16px rgba(235,94,40,0.4);
+  }
+
+  .cl-step.active .cl-step-circle {
+    border-color: var(--accent);
+    color: var(--accent);
+    box-shadow: 0 0 0 4px rgba(235,94,40,0.15);
   }
 
   .cl-step-label {
     margin-left: 10px;
-    font-size: 0.85rem;
+    font-size: 0.82rem;
+    font-weight: 500;
     color: var(--muted);
     white-space: nowrap;
+    transition: color 200ms;
   }
 
-  .cl-step.active .cl-step-label,
-  .cl-step.complete .cl-step-label {
-    color: var(--text);
-  }
+  .cl-step.active .cl-step-label  { color: var(--text); }
+  .cl-step.complete .cl-step-label { color: var(--accent); }
 
   .cl-step-line {
     flex: 1;
-    height: 2px;
-    background: var(--border);
-    margin: 0 12px;
+    height: 1.5px;
+    margin: 0 14px;
+    background: rgba(255,255,255,0.08);
     position: relative;
     overflow: hidden;
+    border-radius: 99px;
   }
 
   .cl-step-line::after {
@@ -209,123 +505,173 @@ const STYLES = `
     background: var(--accent);
     transform: scaleX(var(--fill, 0));
     transform-origin: left;
-    transition: transform 300ms ease;
+    transition: transform 400ms cubic-bezier(.4,0,.2,1);
+    border-radius: 99px;
   }
 
   .cl-steps-mobile {
     display: none;
-    font-size: 0.9rem;
+    font-size: 0.88rem;
     color: var(--muted);
     margin-bottom: 20px;
+    padding: 14px 20px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--border);
+    border-radius: 10px;
   }
 
-  .cl-steps-mobile strong { color: var(--text); }
+  .cl-steps-mobile strong { color: var(--text); font-weight: 600; }
 
-  @media (max-width: 640px) {
-    .cl-steps { display: none; }
+  @media (max-width: 600px) {
+    .cl-steps     { display: none; }
     .cl-steps-mobile { display: block; }
   }
 
-  /* Card */
+  /* ── Card ── */
   .cl-card {
     background: var(--surface);
-    border: 2px solid var(--border);
-    border-radius: 12px;
-    box-shadow: 0 4px 24px rgba(37, 36, 34, 0.10);
-    padding: 28px;
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: 32px 36px;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    box-shadow:
+      0 0 0 1px rgba(255,255,255,0.05) inset,
+      0 24px 64px rgba(0,0,0,0.45);
   }
 
-  @media (max-width: 640px) {
-    .cl-card { padding: 20px; }
-    .cl-hero { padding: 36px 16px 24px; }
+  @media (max-width: 600px) {
+    .cl-card { padding: 22px 20px; }
+  }
+
+  .cl-section-header {
+    margin-bottom: 28px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .cl-section-eyebrow {
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 6px;
   }
 
   .cl-card h2 {
-    margin: 0 0 4px;
-    font-size: 1.25rem;
+    font-size: 1.35rem;
+    font-weight: 800;
+    letter-spacing: -0.03em;
     color: var(--text);
+    margin-bottom: 6px;
   }
 
   .cl-step-desc {
-    margin: 0 0 24px;
     color: var(--muted);
-    font-size: 0.9rem;
+    font-size: 0.88rem;
+    line-height: 1.65;
   }
 
   .cl-fade {
-    animation: cl-fade-step 250ms ease;
+    animation: cl-fade-step 280ms cubic-bezier(.4,0,.2,1);
   }
 
   @keyframes cl-fade-step {
-    from { opacity: 0; transform: translateY(8px); }
-    to { opacity: 1; transform: translateY(0); }
+    from { opacity: 0; transform: translateY(10px); }
+    to   { opacity: 1; transform: translateY(0); }
   }
 
-  /* Form grid & fields */
+  /* ── Form grid & fields ── */
   .cl-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 4px 20px;
+    gap: 0 24px;
   }
 
-  @media (max-width: 640px) {
+  @media (max-width: 600px) {
     .cl-grid { grid-template-columns: 1fr; }
   }
 
   .field {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    margin-bottom: 18px;
+    gap: 7px;
+    margin-bottom: 20px;
   }
 
   .field label {
-    font-size: 0.88rem;
+    font-size: 0.82rem;
     font-weight: 600;
     color: var(--text);
+    letter-spacing: 0.01em;
   }
 
   .field-helper {
-    font-size: 0.8rem;
+    font-size: 0.76rem;
     color: var(--muted);
+    line-height: 1.5;
   }
 
   .input {
-    background: var(--bg);
-    border: 1px solid var(--border);
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.10);
     color: var(--text);
-    border-radius: 8px;
-    padding: 10px 12px;
-    font-size: 0.95rem;
+    border-radius: 10px;
+    padding: 11px 14px;
+    font-size: 0.92rem;
+    font-family: inherit;
     width: 100%;
-    transition: border-color 150ms ease, box-shadow 150ms ease;
+    transition: border-color 150ms, box-shadow 150ms, background 150ms;
+    appearance: none;
+    -webkit-appearance: none;
+  }
+
+  .input option {
+    background: #2e2b28;
+    color: var(--text);
   }
 
   .input::placeholder { color: var(--muted); }
 
+  .input:hover {
+    border-color: rgba(255,255,255,0.18);
+    background: rgba(255,255,255,0.07);
+  }
+
   .input:focus-visible {
     outline: none;
     border-color: var(--accent);
-    box-shadow: 0 0 0 3px rgba(235, 94, 40, 0.35);
+    background: rgba(235,94,40,0.06);
+    box-shadow: 0 0 0 3px rgba(235,94,40,0.18);
   }
 
   .input.error { border-color: var(--bad); }
 
   .field-error {
-    color: #c0392b;
-    font-size: 0.85rem;
+    color: #f06b5b;
+    font-size: 0.78rem;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 5px;
     animation: cl-slide-down 200ms ease;
   }
 
-  @keyframes cl-slide-down {
-    from { opacity: 0; transform: translateY(-6px); }
-    to { opacity: 1; transform: translateY(0); }
+  .field-error::before {
+    content: "⚠";
+    font-size: 0.72rem;
   }
 
-  /* Radio pills */
+  @keyframes cl-slide-down {
+    from { opacity: 0; transform: translateY(-5px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ── Radio pills ── */
   .radio-group {
     display: flex;
-    gap: 10px;
+    gap: 8px;
     flex-wrap: wrap;
   }
 
@@ -333,14 +679,16 @@ const STYLES = `
     position: relative;
     display: inline-flex;
     align-items: center;
-    padding: 9px 16px;
-    border: 1px solid var(--border);
-    border-radius: 999px;
+    padding: 8px 16px;
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 10px;
     cursor: pointer;
-    font-size: 0.9rem;
+    font-size: 0.85rem;
+    font-weight: 500;
     color: var(--muted);
-    background: var(--bg);
-    transition: border-color 150ms ease, background 150ms ease, color 150ms ease;
+    background: rgba(255,255,255,0.04);
+    transition: all 150ms ease;
+    user-select: none;
   }
 
   .radio-pill input {
@@ -349,180 +697,222 @@ const STYLES = `
     pointer-events: none;
   }
 
-  .radio-pill:hover { border-color: var(--accent); }
+  .radio-pill:hover {
+    border-color: var(--accent);
+    color: var(--text);
+    background: var(--accent-dim);
+  }
 
   .radio-pill.active {
     border-color: var(--accent);
-    background: var(--accent);
+    background: var(--accent-dim);
     color: var(--text);
+    font-weight: 600;
+    box-shadow: 0 0 0 1px rgba(235,94,40,0.25);
   }
 
-  .radio-pill:focus-within {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px rgba(235, 94, 40, 0.35);
-  }
-
-  /* Sliders */
-  .slider-field { margin-bottom: 22px; }
+  /* ── Sliders ── */
+  .slider-field { margin-bottom: 24px; }
 
   .slider-label-row {
     display: flex;
     justify-content: space-between;
-    align-items: baseline;
-    gap: 12px;
-    margin-bottom: 8px;
+    align-items: center;
+    margin-bottom: 10px;
   }
 
-  .slider-label-row label { font-size: 0.88rem; font-weight: 600; color: var(--text); }
+  .slider-label-row label {
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text);
+  }
 
   .slider-value {
-    font-weight: 700;
+    font-weight: 800;
     color: var(--accent);
-    font-size: 1rem;
+    font-size: 0.95rem;
     min-width: 24px;
     text-align: right;
+    font-variant-numeric: tabular-nums;
+    background: var(--accent-dim);
+    border: 1px solid rgba(235,94,40,0.25);
+    border-radius: 6px;
+    padding: 2px 8px;
   }
 
   .slider {
     -webkit-appearance: none;
     appearance: none;
     width: 100%;
-    height: 6px;
+    height: 5px;
     border-radius: 999px;
     outline: none;
     cursor: pointer;
-    background: var(--border);
+    background: rgba(255,255,255,0.10);
   }
 
   .slider:focus-visible {
-    box-shadow: 0 0 0 3px rgba(235, 94, 40, 0.35);
+    box-shadow: 0 0 0 3px rgba(235,94,40,0.25);
   }
 
   .slider::-webkit-slider-thumb {
     -webkit-appearance: none;
-    appearance: none;
-    width: 20px;
-    height: 20px;
+    width: 18px; height: 18px;
     border-radius: 50%;
-    background: var(--bg);
+    background: #fff;
     border: 3px solid var(--accent);
     cursor: pointer;
-    transition: transform 150ms ease;
-    margin-top: 0;
+    transition: transform 120ms, box-shadow 120ms;
+    box-shadow: 0 0 0 0 rgba(235,94,40,0);
   }
 
-  .slider::-webkit-slider-thumb:hover { transform: scale(1.12); }
+  .slider::-webkit-slider-thumb:hover {
+    transform: scale(1.15);
+    box-shadow: 0 0 0 6px rgba(235,94,40,0.18);
+  }
 
   .slider::-moz-range-thumb {
-    width: 20px;
-    height: 20px;
+    width: 18px; height: 18px;
     border-radius: 50%;
-    background: var(--bg);
+    background: #fff;
     border: 3px solid var(--accent);
     cursor: pointer;
-  }
-
-  .slider::-moz-range-track {
-    height: 6px;
-    border-radius: 999px;
-    background: transparent;
   }
 
   .slider-range-labels {
     display: flex;
     justify-content: space-between;
-    margin-top: 6px;
-    font-size: 0.78rem;
+    margin-top: 7px;
+    font-size: 0.72rem;
     color: var(--muted);
+    font-weight: 500;
   }
 
-  @media (max-width: 640px) {
-    .slider-range-labels { flex-direction: column; gap: 2px; }
+  /* ── Divider ── */
+  .cl-divider {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 24px 0;
   }
 
-  /* Buttons */
+  .cl-subsection-label {
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 16px;
+  }
+
+  /* ── Buttons ── */
   .cl-nav-buttons {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-top: 28px;
+    margin-top: 32px;
     gap: 12px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
   }
 
   .btn {
-    font-size: 0.95rem;
+    font-size: 0.9rem;
     font-weight: 700;
-    padding: 12px 24px;
-    border-radius: 8px;
+    font-family: inherit;
+    padding: 11px 24px;
+    border-radius: 10px;
     cursor: pointer;
     border: none;
-    transition: background 150ms ease, color 150ms ease, transform 100ms ease, opacity 150ms ease;
+    transition: all 150ms ease;
+    letter-spacing: -0.01em;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
   }
 
   .btn:focus-visible {
     outline: none;
-    box-shadow: 0 0 0 3px rgba(235, 94, 40, 0.35);
+    box-shadow: 0 0 0 3px rgba(235,94,40,0.30);
   }
 
-  .btn:active { transform: scale(0.98); }
+  .btn:active { transform: scale(0.97); }
 
   .btn-primary {
     background: var(--accent);
-    color: var(--text);
+    color: #fff;
+    box-shadow: 0 4px 16px rgba(235,94,40,0.30);
   }
 
-  .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+  .btn-primary:hover:not(:disabled) {
+    background: var(--accent-hover);
+    box-shadow: 0 6px 20px rgba(235,94,40,0.40);
+    transform: translateY(-1px);
+  }
 
   .btn-primary:disabled {
-    opacity: 0.65;
+    opacity: 0.55;
     cursor: not-allowed;
+    box-shadow: none;
   }
 
-  .btn-outline {
+  .btn-ghost {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+
+  .btn-ghost:hover { border-color: rgba(255,255,255,0.20); color: var(--text); }
+
+  .btn-outline-accent {
     background: transparent;
-    border: 2px solid var(--border);
-    color: var(--text);
-  }
-
-  .btn-outline:hover { border-color: var(--accent); color: var(--accent); }
-
-  .btn-outline.accent {
-    border-color: var(--accent);
+    border: 1px solid rgba(235,94,40,0.40);
     color: var(--accent);
   }
 
-  .btn-outline.accent:hover {
+  .btn-outline-accent:hover {
     background: var(--accent);
-    color: var(--text);
+    color: #fff;
+    border-color: var(--accent);
   }
 
   .spinner {
     display: inline-block;
-    width: 14px;
-    height: 14px;
-    border: 2px solid rgba(255, 252, 242, 0.35);
-    border-top-color: var(--text);
+    width: 14px; height: 14px;
+    border: 2px solid rgba(255,255,255,0.25);
+    border-top-color: #fff;
     border-radius: 50%;
-    margin-right: 8px;
-    animation: cl-spin 700ms linear infinite;
-    vertical-align: middle;
+    animation: cl-spin 650ms linear infinite;
   }
 
   @keyframes cl-spin { to { transform: rotate(360deg); } }
 
   .cl-submit-error {
     color: var(--bad);
-    font-size: 0.88rem;
+    font-size: 0.84rem;
     margin-top: 14px;
     text-align: center;
+    padding: 10px 16px;
+    background: rgba(240,107,91,0.08);
+    border: 1px solid rgba(240,107,91,0.25);
+    border-radius: 8px;
   }
 
-  /* Skeleton */
-  .cl-skeleton-msg {
-    color: var(--muted);
-    margin: 0 0 24px;
-    font-size: 0.95rem;
+  /* ── Skeleton ── */
+  .cl-skeleton-header {
     text-align: center;
+    margin-bottom: 32px;
+  }
+
+  .cl-skeleton-header h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+
+  .cl-skeleton-header p {
+    font-size: 0.85rem;
+    color: var(--muted);
   }
 
   .cl-skeleton-grid {
@@ -531,153 +921,207 @@ const STYLES = `
     gap: 16px;
   }
 
-  @media (max-width: 640px) {
-    .cl-skeleton-grid { grid-template-columns: 1fr; }
-  }
+  @media (max-width: 600px) { .cl-skeleton-grid { grid-template-columns: 1fr; } }
 
   .skeleton-card {
     border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 24px;
+    border-radius: 14px;
+    padding: 28px 20px;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 12px;
+    gap: 14px;
   }
 
-  .skeleton-circle,
-  .skeleton-line {
-    background: linear-gradient(90deg, var(--border) 25%, var(--skeleton-highlight) 50%, var(--border) 75%);
+  .skeleton-circle, .skeleton-line {
+    background: linear-gradient(90deg,
+      rgba(255,255,255,0.06) 25%,
+      rgba(255,255,255,0.12) 50%,
+      rgba(255,255,255,0.06) 75%
+    );
     background-size: 200% 100%;
-    animation: cl-shimmer 1.4s ease-in-out infinite;
+    animation: cl-shimmer 1.5s ease-in-out infinite;
     border-radius: 999px;
   }
 
-  .skeleton-circle { width: 60px; height: 60px; }
-  .skeleton-line { width: 80%; height: 12px; }
-  .skeleton-line.short { width: 50%; }
+  .skeleton-circle { width: 64px; height: 64px; border-radius: 50%; }
+  .skeleton-line   { width: 75%;  height: 11px; }
+  .skeleton-line.short { width: 48%; }
 
   @keyframes cl-shimmer {
-    0% { background-position: 200% 0; }
+    0%   { background-position: 200% 0; }
     100% { background-position: -200% 0; }
   }
 
-  /* Results */
+  /* ── Results ── */
+  .cl-results-header {
+    text-align: center;
+    margin-bottom: 28px;
+  }
+
+  .cl-results-header h2 {
+    font-size: 1.5rem;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+
+  .cl-results-header p {
+    font-size: 0.88rem;
+    color: var(--muted);
+  }
+
   .cl-results-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
-    gap: 20px;
+    gap: 16px;
+    margin-bottom: 24px;
   }
 
-  @media (max-width: 640px) {
-    .cl-results-grid { grid-template-columns: 1fr; }
-  }
+  @media (max-width: 640px) { .cl-results-grid { grid-template-columns: 1fr; } }
 
   .result-card {
-    background: var(--surface);
+    background: rgba(255,255,255,0.03);
     border: 1px solid var(--border);
-    border-radius: 12px;
-    box-shadow: 0 4px 24px rgba(37, 36, 34, 0.10);
-    padding: 24px 20px;
+    border-radius: 14px;
+    padding: 24px 18px;
     text-align: center;
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 10px;
+    transition: border-color 200ms;
+  }
+
+  .result-card:hover { border-color: rgba(235,94,40,0.30); }
+
+  .result-card-label {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
   }
 
   .result-card h3 {
-    margin: 0;
-    font-size: 1.05rem;
+    font-size: 1rem;
+    font-weight: 700;
     color: var(--text);
+    letter-spacing: -0.02em;
   }
 
-  .score-ring { display: block; margin: 4px auto; }
+  .score-ring { display: block; margin: 6px auto 0; }
 
-  .score-ring-fill { transition: stroke-dashoffset 800ms ease-out; }
+  .score-ring-fill { transition: stroke-dashoffset 900ms cubic-bezier(.4,0,.2,1); }
 
   .score-ring-text {
-    fill: var(--text);
-    font-size: 24px;
+    fill: var(--text, #fffcf2);
+    font-size: 22px;
     font-weight: 800;
-    font-family: inherit;
+    font-family: 'Inter', sans-serif;
+    letter-spacing: -0.03em;
+  }
+
+  .score-ring-sub {
+    fill: #9e9891;
+    font-size: 9px;
+    font-weight: 500;
+    font-family: 'Inter', sans-serif;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
   }
 
   .result-badge {
     font-weight: 700;
-    font-size: 0.9rem;
+    font-size: 0.78rem;
     padding: 4px 14px;
     border-radius: 999px;
+    letter-spacing: 0.02em;
   }
 
-  .result-badge.good { color: var(--good); background: rgba(139, 209, 124, 0.12); }
-  .result-badge.warn { color: var(--warn); background: rgba(242, 177, 52, 0.12); }
-  .result-badge.bad { color: var(--bad); background: rgba(255, 107, 91, 0.12); }
+  .result-badge.good { color: var(--good); background: var(--good-bg); border: 1px solid rgba(127,201,122,0.25); }
+  .result-badge.warn { color: var(--warn); background: var(--warn-bg); border: 1px solid rgba(232,184,75,0.25); }
+  .result-badge.bad  { color: var(--bad);  background: var(--bad-bg);  border: 1px solid rgba(240,107,91,0.25); }
 
   .result-accuracy {
-    color: var(--muted);
-    font-size: 0.78rem;
-    margin: auto 0 0;
-    padding-top: 8px;
+    color: #5c5954;
+    font-size: 0.7rem;
+    margin-top: auto;
+    font-variant-numeric: tabular-nums;
+    font-weight: 500;
   }
 
-  .counsel-icon {
-    font-size: 48px;
-    font-weight: 800;
-    line-height: 1;
+  .counsel-icon-wrap {
+    width: 56px; height: 56px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.5rem;
   }
 
-  .counsel-icon.yes { color: var(--accent); }
-  .counsel-icon.no { color: var(--good); }
+  .counsel-icon-wrap.yes {
+    background: var(--accent-dim);
+    border: 1px solid rgba(235,94,40,0.30);
+  }
+
+  .counsel-icon-wrap.no {
+    background: var(--good-bg);
+    border: 1px solid rgba(127,201,122,0.30);
+  }
 
   .counsel-title {
-    font-size: 1rem;
+    font-size: 0.95rem;
     font-weight: 700;
     color: var(--text);
   }
 
   .counsel-sub {
     color: var(--muted);
-    font-size: 0.85rem;
-    margin: 0;
+    font-size: 0.78rem;
+    line-height: 1.55;
+    text-align: center;
   }
 
   .cl-disclaimer {
     border: 1px solid var(--border);
-    background: var(--surface);
-    border-radius: 10px;
-    padding: 16px 18px;
-    margin-top: 24px;
+    background: rgba(255,255,255,0.02);
+    border-radius: 12px;
+    padding: 16px 20px;
     color: var(--muted);
-    font-size: 0.85rem;
-    line-height: 1.6;
+    font-size: 0.80rem;
+    line-height: 1.65;
   }
 
   .cl-start-over {
     display: flex;
     justify-content: center;
-    margin-top: 24px;
+    margin-top: 20px;
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 480px) {
+    .cl-hero h1     { font-size: 1.8rem; }
+    .cl-hero-stats  { flex-direction: column; }
+    .cl-hero-stat   { border-right: none; border-bottom: 1px solid var(--border); }
+    .cl-hero-stat:last-child { border-bottom: none; }
+    .cl-navbar      { padding: 0 16px; }
+    .cl-container   { padding: 16px 14px 64px; }
+  }
+
+  /* ── Select arrow ── */
+  select.input {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='7' viewBox='0 0 12 7'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%239e9891' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    padding-right: 36px;
   }
 `;
 
-// ---------------------------------------------------------------------------
-// Small reusable pieces
-// ---------------------------------------------------------------------------
-
-function StatusPill({ status }) {
-  const config = {
-    warming: { text: "Model warming up…", cls: "warming" },
-    ready: { text: "Model ready ✓", cls: "ready" },
-    slow: { text: "Model may be slow", cls: "slow" },
-  };
-  const current = config[status] || config.warming;
-  return (
-    <div className={`cl-pill ${current.cls}`}>
-      <span className="dot" />
-      <span>{current.text}</span>
-    </div>
-  );
-}
+/* ─────────────────────────────────────────────
+   SMALL REUSABLE COMPONENTS
+───────────────────────────────────────────── */
 
 function StepProgress({ step }) {
   return (
@@ -810,7 +1254,7 @@ function SliderField({ label, name, value, onChange, lowLabel, highLabel }) {
         onChange={onChange}
         className="slider"
         style={{
-          background: `linear-gradient(to right, var(--accent) ${pct}%, var(--border) ${pct}%)`,
+          background: `linear-gradient(to right, var(--accent) ${pct}%, rgba(255,255,255,0.10) ${pct}%)`,
         }}
       />
       <div className="slider-range-labels">
@@ -831,7 +1275,7 @@ function SkeletonCard() {
   );
 }
 
-function ScoreRing({ value, max = 10, size = 132, strokeWidth = 10 }) {
+function ScoreRing({ value, max = 10, size = 128, strokeWidth = 9 }) {
   const [filled, setFilled] = useState(false);
   const radius = (size - strokeWidth) / 2;
   const circumference = 2 * Math.PI * radius;
@@ -855,7 +1299,7 @@ function ScoreRing({ value, max = 10, size = 132, strokeWidth = 10 }) {
         cy={size / 2}
         r={radius}
         fill="none"
-        stroke="var(--border)"
+        stroke="rgba(255,255,255,0.08)"
         strokeWidth={strokeWidth}
       />
       <circle
@@ -873,20 +1317,29 @@ function ScoreRing({ value, max = 10, size = 132, strokeWidth = 10 }) {
       />
       <text
         x="50%"
-        y="50%"
+        y="46%"
         textAnchor="middle"
         dominantBaseline="central"
         className="score-ring-text"
       >
         {value.toFixed(1)}
       </text>
+      <text
+        x="50%"
+        y="68%"
+        textAnchor="middle"
+        dominantBaseline="central"
+        className="score-ring-sub"
+      >
+        / 10
+      </text>
     </svg>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Validation
-// ---------------------------------------------------------------------------
+/* ─────────────────────────────────────────────
+   VALIDATION (unchanged logic)
+───────────────────────────────────────────── */
 
 function isFilledNumber(v) {
   return v !== "" && v !== null && v !== undefined && !Number.isNaN(Number(v));
@@ -896,15 +1349,12 @@ function validateStep(step, data) {
   const errors = {};
 
   if (step === 1) {
-    if (!isFilledNumber(data.age) || data.age < 16 || data.age > 40) {
+    if (!isFilledNumber(data.age) || data.age < 16 || data.age > 40)
       errors.age = "Enter an age between 16 and 40.";
-    }
-    if (!data.gender) {
+    if (!data.gender)
       errors.gender = "Select the option that best describes you.";
-    }
-    if (!data.urban_or_rural) {
+    if (!data.urban_or_rural)
       errors.urban_or_rural = "Let us know where you're based.";
-    }
   }
 
   if (step === 2) {
@@ -914,28 +1364,24 @@ function validateStep(step, data) {
       !isFilledNumber(data.year_of_study) ||
       data.year_of_study < 1 ||
       data.year_of_study > 6
-    ) {
-      errors.year_of_study = "Enter a year of study between 1 and 6.";
-    }
+    )
+      errors.year_of_study = "Enter a year between 1 and 6.";
     if (!data.college_tier) errors.college_tier = "Select your college tier.";
     if (
       !isFilledNumber(data.internship_experience) ||
       data.internship_experience < 0
-    ) {
+    )
       errors.internship_experience = "Enter 0 or more internships.";
-    }
     if (
       !isFilledNumber(data.skill_development_courses_taken) ||
       data.skill_development_courses_taken < 0
-    ) {
+    )
       errors.skill_development_courses_taken = "Enter 0 or more courses.";
-    }
     if (
       !isFilledNumber(data.weekly_job_application_count) ||
       data.weekly_job_application_count < 0
-    ) {
+    )
       errors.weekly_job_application_count = "Enter 0 or more applications.";
-    }
   }
 
   if (step === 3) {
@@ -945,9 +1391,8 @@ function validateStep(step, data) {
       !isFilledNumber(data.daily_ai_tool_usage_hrs) ||
       data.daily_ai_tool_usage_hrs < 0 ||
       data.daily_ai_tool_usage_hrs > 24
-    ) {
+    )
       errors.daily_ai_tool_usage_hrs = "Enter a value between 0 and 24 hours.";
-    }
   }
 
   if (step === 4) {
@@ -955,39 +1400,33 @@ function validateStep(step, data) {
       !isFilledNumber(data.daily_study_hours) ||
       data.daily_study_hours < 0 ||
       data.daily_study_hours > 24
-    ) {
+    )
       errors.daily_study_hours = "Enter a value between 0 and 24 hours.";
-    }
     if (
       !isFilledNumber(data.self_learning_hours_per_week) ||
       data.self_learning_hours_per_week < 0
-    ) {
+    )
       errors.self_learning_hours_per_week = "Enter 0 or more hours.";
-    }
     if (
       !isFilledNumber(data.social_media_hrs_per_day) ||
       data.social_media_hrs_per_day < 0 ||
       data.social_media_hrs_per_day > 24
-    ) {
+    )
       errors.social_media_hrs_per_day = "Enter a value between 0 and 24 hours.";
-    }
     if (
       !isFilledNumber(data.sleep_hours) ||
       data.sleep_hours < 0 ||
       data.sleep_hours > 24
-    ) {
+    )
       errors.sleep_hours = "Enter a value between 0 and 24 hours.";
-    }
-    const totalDailyHours =
+    const total =
       Number(data.daily_ai_tool_usage_hrs || 0) +
       Number(data.daily_study_hours || 0) +
       Number(data.social_media_hrs_per_day || 0) +
       Number(data.sleep_hours || 0);
-
-    if (totalDailyHours > 24) {
+    if (total > 24)
       errors.total_daily_hours =
-        "AI Usage + Study + Social Media + Sleep hours cannot exceed 24 hours.";
-    }
+        "AI Usage + Study + Social Media + Sleep cannot exceed 24 hours.";
   }
 
   return errors;
@@ -1005,10 +1444,9 @@ function readinessBand(score) {
   return { text: "Strong", cls: "good" };
 }
 
-// ---------------------------------------------------------------------------
-// Results panel
-// ---------------------------------------------------------------------------
-
+/* ─────────────────────────────────────────────
+   RESULTS PANEL
+───────────────────────────────────────────── */
 function ResultsPanel({ results, onReset }) {
   const burnout = Number(results.burnout_score);
   const readiness = Number(results.career_readiness_score);
@@ -1019,36 +1457,43 @@ function ResultsPanel({ results, onReset }) {
 
   return (
     <div className="cl-card cl-fade">
+      <div className="cl-results-header">
+        <h2>Your Career Insights</h2>
+        <p>
+          Predicted by ML models trained on real student data. Treat as a
+          starting point, not a verdict.
+        </p>
+      </div>
+
       <div className="cl-results-grid">
         <div className="result-card">
-          <h3>Burnout Risk</h3>
+          <div className="result-card-label">Burnout Risk</div>
           <ScoreRing value={burnout} />
           <span className={`result-badge ${bBand.cls}`}>{bBand.text}</span>
           <p className="result-accuracy">R² 0.56 · RMSE ±1.37</p>
         </div>
 
         <div className="result-card">
-          <h3>Career Readiness</h3>
+          <div className="result-card-label">Career Readiness</div>
           <ScoreRing value={readiness} />
           <span className={`result-badge ${rBand.cls}`}>{rBand.text}</span>
           <p className="result-accuracy">R² 0.50 · RMSE ±1.13</p>
         </div>
 
         <div className="result-card">
-          <h3>Counselling Recommendation</h3>
+          <div className="result-card-label">Counselling</div>
           {counseling === 1 ? (
             <>
-              <div className="counsel-icon yes">✓</div>
+              <div className="counsel-icon-wrap yes">✓</div>
               <div className="counsel-title">Recommended</div>
               <p className="counsel-sub">
-                Based on your profile, career counselling could be highly
-                beneficial.
+                Career counselling could be highly beneficial for your profile.
               </p>
             </>
           ) : (
             <>
-              <div className="counsel-icon no">✗</div>
-              <div className="counsel-title">Not Recommended</div>
+              <div className="counsel-icon-wrap no">✗</div>
+              <div className="counsel-title">Not Needed Now</div>
               <p className="counsel-sub">
                 Your indicators don't suggest a pressing need right now.
               </p>
@@ -1059,7 +1504,7 @@ function ResultsPanel({ results, onReset }) {
       </div>
 
       <div className="cl-disclaimer">
-        These predictions are generated by machine learning models trained on
+        These predictions are generated by machine-learning models trained on
         student survey data. They are indicative, not diagnostic. Scores carry
         inherent uncertainty — treat them as a starting point for reflection,
         not a verdict.
@@ -1068,7 +1513,7 @@ function ResultsPanel({ results, onReset }) {
       <div className="cl-start-over">
         <button
           type="button"
-          className="btn btn-outline accent"
+          className="btn btn-outline-accent"
           onClick={onReset}
         >
           Start Over
@@ -1078,10 +1523,9 @@ function ResultsPanel({ results, onReset }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Main app
-// ---------------------------------------------------------------------------
-
+/* ─────────────────────────────────────────────
+   MAIN APP
+───────────────────────────────────────────── */
 export default function App() {
   const [step, setStep] = useState(1);
   const [formData, setFormData] = useState(initialFormData);
@@ -1093,25 +1537,23 @@ export default function App() {
   const [modelStatus, setModelStatus] = useState("warming");
   const modelReady = useRef(false);
 
-  // Wake-up ping — fired once on mount, never blocks the UI.
+  /* Wake-up ping — unchanged */
   useEffect(() => {
     let cancelled = false;
-
     fetch(`${API_BASE}/model_status`)
       .then((res) => {
-        if (!res.ok) throw new Error("Model status check failed");
+        if (!res.ok) throw new Error();
         return res.json();
       })
       .then(() => {
-        if (cancelled) return;
-        modelReady.current = true;
-        setModelStatus("ready");
+        if (!cancelled) {
+          modelReady.current = true;
+          setModelStatus("ready");
+        }
       })
       .catch(() => {
-        if (cancelled) return;
-        setModelStatus("slow");
+        if (!cancelled) setModelStatus("slow");
       });
-
     return () => {
       cancelled = true;
     };
@@ -1132,9 +1574,9 @@ export default function App() {
   };
 
   const handleNext = () => {
-    const stepErrors = validateStep(step, formData);
-    if (Object.keys(stepErrors).length > 0) {
-      setErrors(stepErrors);
+    const errs = validateStep(step, formData);
+    if (Object.keys(errs).length > 0) {
+      setErrors(errs);
       return;
     }
     setErrors({});
@@ -1146,10 +1588,11 @@ export default function App() {
     setStep((s) => Math.max(1, s - 1));
   };
 
+  /* Submit — API call unchanged */
   const handleSubmit = async () => {
-    const stepErrors = validateStep(4, formData);
-    if (Object.keys(stepErrors).length > 0) {
-      setErrors(stepErrors);
+    const errs = validateStep(4, formData);
+    if (Object.keys(errs).length > 0) {
+      setErrors(errs);
       return;
     }
 
@@ -1199,14 +1642,11 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-
-      if (!res.ok) throw new Error(`Request failed with status ${res.status}`);
-
-      const data = await res.json();
-      setResults(data);
-    } catch (err) {
+      if (!res.ok) throw new Error(`Status ${res.status}`);
+      setResults(await res.json());
+    } catch {
       setSubmitError(
-        "We couldn't reach the prediction service. Please try again in a moment.",
+        "Couldn't reach the prediction service. Please try again in a moment.",
       );
       setSubmitted(false);
     } finally {
@@ -1230,48 +1670,75 @@ export default function App() {
     <div className="cl-app">
       <style>{STYLES}</style>
 
+      {/* Fixed WebGL background */}
+      <ShaderBackground />
+
+      {/* Navbar */}
       <nav className="cl-navbar">
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "10px",
-          }}
-        >
+        <div className="cl-logo-wrap">
           <img
             src="/favicon.png"
             alt="CareerLens logo"
-            width="32"
-            height="32"
+            width="28"
+            height="28"
+            style={{ borderRadius: 6, flexShrink: 0 }}
           />
-
-          <div className="cl-logo">CareerLens</div>
+          <div className="cl-logo">
+            Career<span>Lens</span>
+          </div>
         </div>
       </nav>
 
+      {/* Hero */}
       <header className="cl-hero">
-        <h1>Understand Your Career Trajectory with AI</h1>
+        <div className="cl-hero-eyebrow">ML-Powered · Student Edition</div>
+        <h1>
+          Know Your Career
+          <br />
+          <em>Before It Defines You</em>
+        </h1>
         <p>
-          Answer 24 questions. Get your burnout risk, career readiness, and
-          counselling need — predicted by ML models trained on real student
-          data.
+          Answer 24 questions about your academics, AI habits, and lifestyle —
+          get your burnout risk, career readiness, and counselling need in
+          seconds.
         </p>
+        <div className="cl-hero-stats">
+          <div className="cl-hero-stat">
+            <span className="cl-hero-stat-num">24</span>
+            <span className="cl-hero-stat-lbl">questions</span>
+          </div>
+          <div className="cl-hero-stat">
+            <span className="cl-hero-stat-num">3</span>
+            <span className="cl-hero-stat-lbl">predictions</span>
+          </div>
+          <div className="cl-hero-stat">
+            <span className="cl-hero-stat-num">&lt;60s</span>
+            <span className="cl-hero-stat-lbl">to complete</span>
+          </div>
+        </div>
       </header>
 
       <main className="cl-container">
+        {/* ── FORM ── */}
         {showForm && (
           <>
-            <StepProgress step={step} />
+            <div className="cl-steps-wrap">
+              <StepProgress step={step} />
+            </div>
 
             <div className="cl-card">
               <div key={step} className="cl-fade">
+                {/* Step 1 — Personal */}
                 {step === 1 && (
                   <>
-                    <h2>Personal Details</h2>
-                    <p className="cl-step-desc">
-                      Let's start with a bit about you — this helps us calibrate
-                      the model to your stage of life.
-                    </p>
+                    <div className="cl-section-header">
+                      <div className="cl-section-eyebrow">Step 1 of 4</div>
+                      <h2>Personal Details</h2>
+                      <p className="cl-step-desc">
+                        A bit about you — this helps calibrate the model to your
+                        life stage.
+                      </p>
+                    </div>
                     <div className="cl-grid">
                       <NumberField
                         label="Age"
@@ -1282,7 +1749,7 @@ export default function App() {
                         max={40}
                         step={1}
                         error={errors.age}
-                        helper="Used to compare you with peers at a similar life stage."
+                        helper="Used to compare you with peers at a similar stage."
                       />
                       <RadioField
                         label="Gender"
@@ -1304,13 +1771,17 @@ export default function App() {
                   </>
                 )}
 
+                {/* Step 2 — Academic */}
                 {step === 2 && (
                   <>
-                    <h2>Academic Background</h2>
-                    <p className="cl-step-desc">
-                      Tell us about your course of study and how you've been
-                      building your profile so far.
-                    </p>
+                    <div className="cl-section-header">
+                      <div className="cl-section-eyebrow">Step 2 of 4</div>
+                      <h2>Academic Background</h2>
+                      <p className="cl-step-desc">
+                        Your course of study and how you've been building your
+                        profile so far.
+                      </p>
+                    </div>
                     <div className="cl-grid">
                       <SelectField
                         label="Degree Type"
@@ -1361,7 +1832,7 @@ export default function App() {
                         min={0}
                         step={1}
                         error={errors.internship_experience}
-                        helper="Include internships you're currently doing."
+                        helper="Include any internship you're currently doing."
                       />
                       <NumberField
                         label="Online Courses Taken"
@@ -1371,7 +1842,7 @@ export default function App() {
                         min={0}
                         step={1}
                         error={errors.skill_development_courses_taken}
-                        helper="Certifications or MOOCs completed outside your regular coursework."
+                        helper="Certifications or MOOCs outside your regular coursework."
                       />
                       <NumberField
                         label="Job Applications / Week"
@@ -1381,19 +1852,23 @@ export default function App() {
                         min={0}
                         step={1}
                         error={errors.weekly_job_application_count}
-                        helper="Average applications you send out in a typical week."
+                        helper="Average applications you send in a typical week."
                       />
                     </div>
                   </>
                 )}
 
+                {/* Step 3 — AI & Career */}
                 {step === 3 && (
                   <>
-                    <h2>AI & Career Outlook</h2>
-                    <p className="cl-step-desc">
-                      Tell us how AI tools fit into your routine, and how you
-                      feel about your career path right now.
-                    </p>
+                    <div className="cl-section-header">
+                      <div className="cl-section-eyebrow">Step 3 of 4</div>
+                      <h2>AI & Career Outlook</h2>
+                      <p className="cl-step-desc">
+                        How AI tools fit into your routine, and how you feel
+                        about your career path right now.
+                      </p>
+                    </div>
                     <div className="cl-grid">
                       <SelectField
                         label="Primary AI Tool Used"
@@ -1420,9 +1895,12 @@ export default function App() {
                         max={24}
                         step={0.5}
                         error={errors.daily_ai_tool_usage_hrs}
-                        helper="Roughly how many hours a day you use AI tools for study or work."
+                        helper="Hours per day using AI tools for study or work."
                       />
                     </div>
+
+                    <hr className="cl-divider" />
+                    <div className="cl-subsection-label">AI Relationship</div>
 
                     <SliderField
                       label="AI replaces my own thinking"
@@ -1448,6 +1926,10 @@ export default function App() {
                       lowLabel="Not worried"
                       highLabel="Very worried"
                     />
+
+                    <hr className="cl-divider" />
+                    <div className="cl-subsection-label">Career Confidence</div>
+
                     <SliderField
                       label="Clarity about your career path"
                       name="career_clarity_score"
@@ -1475,13 +1957,17 @@ export default function App() {
                   </>
                 )}
 
+                {/* Step 4 — Lifestyle */}
                 {step === 4 && (
                   <>
-                    <h2>Lifestyle & Wellbeing</h2>
-                    <p className="cl-step-desc">
-                      Almost done — a few questions about how you spend your
-                      time day to day.
-                    </p>
+                    <div className="cl-section-header">
+                      <div className="cl-section-eyebrow">Step 4 of 4</div>
+                      <h2>Lifestyle & Wellbeing</h2>
+                      <p className="cl-step-desc">
+                        Almost done — a few questions about how you spend your
+                        time day to day.
+                      </p>
+                    </div>
                     <div className="cl-grid">
                       <NumberField
                         label="Daily Study Hours"
@@ -1492,10 +1978,10 @@ export default function App() {
                         max={24}
                         step={0.5}
                         error={errors.daily_study_hours}
-                        helper="Average hours per day on coursework, assignments, or revision."
+                        helper="Hours per day on coursework, assignments, or revision."
                       />
                       <NumberField
-                        label="Self-Learning Hours / Week"
+                        label="Self-Learning Hrs / Week"
                         name="self_learning_hours_per_week"
                         value={formData.self_learning_hours_per_week}
                         onChange={handleChange}
@@ -1505,7 +1991,7 @@ export default function App() {
                         helper="Time spent learning outside your formal curriculum."
                       />
                       <NumberField
-                        label="Social Media Hours / Day"
+                        label="Social Media Hrs / Day"
                         name="social_media_hrs_per_day"
                         value={formData.social_media_hrs_per_day}
                         onChange={handleChange}
@@ -1513,10 +1999,10 @@ export default function App() {
                         max={24}
                         step={0.5}
                         error={errors.social_media_hrs_per_day}
-                        helper="Average hours per day spent on social media."
+                        helper="Average hours per day on social media."
                       />
                       <NumberField
-                        label="Sleep Hours / Night"
+                        label="Sleep Hrs / Night"
                         name="sleep_hours"
                         value={formData.sleep_hours}
                         onChange={handleChange}
@@ -1527,14 +2013,15 @@ export default function App() {
                         helper="Average hours of sleep per night."
                       />
                     </div>
+
                     {errors.total_daily_hours && (
-                      <div
-                        className="field-error"
-                        style={{ marginBottom: "16px" }}
-                      >
+                      <div className="field-error" style={{ marginBottom: 16 }}>
                         {errors.total_daily_hours}
                       </div>
                     )}
+
+                    <hr className="cl-divider" />
+                    <div className="cl-subsection-label">Mental State</div>
 
                     <SliderField
                       label="Current stress level"
@@ -1556,26 +2043,26 @@ export default function App() {
                 )}
               </div>
 
+              {/* Nav buttons */}
               <div className="cl-nav-buttons">
                 {step > 1 ? (
                   <button
                     type="button"
-                    className="btn btn-outline"
+                    className="btn btn-ghost"
                     onClick={handleBack}
                   >
-                    Back
+                    ← Back
                   </button>
                 ) : (
                   <div />
                 )}
-
                 {step < STEPS.length ? (
                   <button
                     type="button"
                     className="btn btn-primary"
                     onClick={handleNext}
                   >
-                    Next
+                    Continue →
                   </button>
                 ) : (
                   <button
@@ -1586,11 +2073,10 @@ export default function App() {
                   >
                     {loading ? (
                       <>
-                        <span className="spinner" />
-                        Analysing…
+                        <span className="spinner" /> Analysing…
                       </>
                     ) : (
-                      "Submit"
+                      "Get My Results →"
                     )}
                   </button>
                 )}
@@ -1603,11 +2089,16 @@ export default function App() {
           </>
         )}
 
+        {/* ── SKELETON ── */}
         {showSkeleton && (
           <div className="cl-card cl-fade">
-            <p className="cl-skeleton-msg">
-              Your results are being computed by our ML models…
-            </p>
+            <div className="cl-skeleton-header">
+              <h3>Computing your results…</h3>
+              <p>
+                Our ML models are crunching your profile. This takes just a
+                moment.
+              </p>
+            </div>
             <div className="cl-skeleton-grid">
               <SkeletonCard />
               <SkeletonCard />
@@ -1616,6 +2107,7 @@ export default function App() {
           </div>
         )}
 
+        {/* ── RESULTS ── */}
         {results && <ResultsPanel results={results} onReset={handleReset} />}
       </main>
     </div>
